@@ -73,6 +73,8 @@ class test1(gr.top_block, Qt.QWidget):
         self.audio_rate = audio_rate = quad_rate / audio_decimation
         self.center_freq = center_freq
         self.volume = volume = 0.3
+        self.lna_gain = lna_gain = 16
+        self.vga_gain = vga_gain = 16
 
         ##################################################
         # Blocks
@@ -90,8 +92,8 @@ class test1(gr.top_block, Qt.QWidget):
         self.soapy_hackrf_source_0.set_bandwidth(0, samp_rate)
         self.soapy_hackrf_source_0.set_frequency(0, center_freq)
         self.soapy_hackrf_source_0.set_gain(0, 'AMP', False)
-        self.soapy_hackrf_source_0.set_gain(0, 'LNA', min(max(16, 0.0), 40.0))
-        self.soapy_hackrf_source_0.set_gain(0, 'VGA', min(max(16, 0.0), 62.0))
+        self.soapy_hackrf_source_0.set_gain(0, 'LNA', min(max(lna_gain, 0.0), 40.0))
+        self.soapy_hackrf_source_0.set_gain(0, 'VGA', min(max(vga_gain, 0.0), 62.0))
         self.qtgui_waterfall_sink_x_0 = qtgui.waterfall_sink_c(
             1024, #size
             window.WIN_BLACKMAN_hARRIS, #wintype
@@ -139,6 +141,37 @@ class test1(gr.top_block, Qt.QWidget):
         )
         self._freq_control_layout.addWidget(self._freq_label)
         self._freq_control_layout.addWidget(self._freq_spinbox)
+
+        self._lna_label = Qt.QLabel("LNA:")
+        self._lna_slider = Qt.QSlider(Qt.Qt.Horizontal)
+        self._lna_slider.setRange(0, 40)
+        self._lna_slider.setSingleStep(8)
+        self._lna_slider.setPageStep(8)
+        self._lna_slider.setTickInterval(8)
+        self._lna_slider.setTickPosition(Qt.QSlider.TicksBelow)
+        self._lna_slider.setValue(int(lna_gain))
+        self._lna_value_label = Qt.QLabel(f"{int(lna_gain)} dB")
+        self._lna_value_label.setMinimumWidth(48)
+        self._lna_slider.valueChanged.connect(self.set_lna_gain)
+        self._freq_control_layout.addWidget(self._lna_label)
+        self._freq_control_layout.addWidget(self._lna_slider)
+        self._freq_control_layout.addWidget(self._lna_value_label)
+
+        self._vga_label = Qt.QLabel("VGA:")
+        self._vga_slider = Qt.QSlider(Qt.Qt.Horizontal)
+        self._vga_slider.setRange(0, 62)
+        self._vga_slider.setSingleStep(2)
+        self._vga_slider.setPageStep(2)
+        self._vga_slider.setTickInterval(10)
+        self._vga_slider.setTickPosition(Qt.QSlider.TicksBelow)
+        self._vga_slider.setValue(int(vga_gain))
+        self._vga_value_label = Qt.QLabel(f"{int(vga_gain)} dB")
+        self._vga_value_label.setMinimumWidth(48)
+        self._vga_slider.valueChanged.connect(self.set_vga_gain)
+        self._freq_control_layout.addWidget(self._vga_label)
+        self._freq_control_layout.addWidget(self._vga_slider)
+        self._freq_control_layout.addWidget(self._vga_value_label)
+
         self._freq_control_layout.addStretch(1)
         self.top_layout.addLayout(self._freq_control_layout)
 
@@ -193,6 +226,22 @@ class test1(gr.top_block, Qt.QWidget):
         self.center_freq = center_freq
         self.soapy_hackrf_source_0.set_frequency(0, self.center_freq)
         self.qtgui_waterfall_sink_x_0.set_frequency_range(0, self.samp_rate)
+
+    def get_lna_gain(self):
+        return self.lna_gain
+
+    def set_lna_gain(self, lna_gain):
+        self.lna_gain = lna_gain
+        self.soapy_hackrf_source_0.set_gain(0, 'LNA', min(max(lna_gain, 0.0), 40.0))
+        self._lna_value_label.setText(f"{int(lna_gain)} dB")
+
+    def get_vga_gain(self):
+        return self.vga_gain
+
+    def set_vga_gain(self, vga_gain):
+        self.vga_gain = vga_gain
+        self.soapy_hackrf_source_0.set_gain(0, 'VGA', min(max(vga_gain, 0.0), 62.0))
+        self._vga_value_label.setText(f"{int(vga_gain)} dB")
 
 
 
