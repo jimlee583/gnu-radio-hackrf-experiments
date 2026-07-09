@@ -38,10 +38,20 @@ Plug in the HackRF, then run:
 python3 hackrf_fm_radio.py --frequency 101.1
 ```
 
-`--frequency` is in MHz and defaults to `100.1`. The Qt window has a spinbox
-above the waterfall for tuning any station between 88.0 and 108.0 MHz while
-the flowgraph is running.
+Flags:
 
-De-emphasis is fixed at 75 µs (US broadcast). The audio path decimates
-2 Msps IQ down to 50 kHz mono through a channel filter, `analog.wfm_rcv`, and
-a volume trim before the PortAudio sink.
+- `--frequency` — center frequency in MHz. Default: `100.0`.
+- `--samp-rate` — HackRF sample rate in Msps. Allowed: `2`, `4`, `8`, `10`.
+  Default: `8.0`. Higher rates show a wider slice of the FM band on the
+  waterfall (8 Msps ≈ 8 MHz of spectrum around the tuned frequency).
+
+The Qt window has a spinbox above the waterfall for tuning any station
+between 88.0 and 108.0 MHz while the flowgraph is running, plus LNA/VGA
+gain sliders to trim signal level in real time.
+
+De-emphasis is fixed at 75 µs (US broadcast). The audio path decimates the
+raw IQ down to a fixed 200 kHz `quad_rate` through the channel filter, then
+to 50 kHz mono through `analog.wfm_rcv`, and finally through a volume trim
+before the PortAudio sink. Sample rate and quad rate are decoupled, so
+`--samp-rate` only affects the spectrum view and the channel filter — the
+demod and audio stages are unchanged.

@@ -32,7 +32,7 @@ import threading
 
 class test1(gr.top_block, Qt.QWidget):
 
-    def __init__(self, center_freq=100.1e6):
+    def __init__(self, center_freq=100.0e6, samp_rate=8e6):
         gr.top_block.__init__(self, "Not titled yet", catch_exceptions=True)
         Qt.QWidget.__init__(self)
         self.setWindowTitle("Not titled yet")
@@ -66,10 +66,10 @@ class test1(gr.top_block, Qt.QWidget):
         ##################################################
         # Variables
         ##################################################
-        self.samp_rate = samp_rate = 2e6
-        self.channel_decim = channel_decim = 10
+        self.samp_rate = samp_rate
+        self.quad_rate = quad_rate = 200e3
+        self.channel_decim = channel_decim = int(samp_rate / quad_rate)
         self.audio_decimation = audio_decimation = 4
-        self.quad_rate = quad_rate = samp_rate / channel_decim
         self.audio_rate = audio_rate = quad_rate / audio_decimation
         self.center_freq = center_freq
         self.volume = volume = 0.3
@@ -97,7 +97,7 @@ class test1(gr.top_block, Qt.QWidget):
         self.qtgui_waterfall_sink_x_0 = qtgui.waterfall_sink_c(
             1024, #size
             window.WIN_BLACKMAN_hARRIS, #wintype
-            0, #fc
+            center_freq, #fc
             samp_rate, #bw
             "", #name
             1, #number of inputs
@@ -178,7 +178,7 @@ class test1(gr.top_block, Qt.QWidget):
         self.top_layout.addWidget(self._qtgui_waterfall_sink_x_0_win)
 
         channel_taps = firdes.low_pass(
-            1.0, samp_rate, 100e3, 10e3,
+            1.0, samp_rate, 90e3, 50e3,
             window.WIN_HAMMING, 6.76
         )
         self.freq_xlating_fir_filter = filter.freq_xlating_fir_filter_ccc(
@@ -217,7 +217,7 @@ class test1(gr.top_block, Qt.QWidget):
         self.samp_rate = samp_rate
         self.soapy_hackrf_source_0.set_sample_rate(0, self.samp_rate)
         self.soapy_hackrf_source_0.set_bandwidth(0, self.samp_rate)
-        self.qtgui_waterfall_sink_x_0.set_frequency_range(0, self.samp_rate)
+        self.qtgui_waterfall_sink_x_0.set_frequency_range(self.center_freq, self.samp_rate)
 
     def get_center_freq(self):
         return self.center_freq
@@ -225,7 +225,7 @@ class test1(gr.top_block, Qt.QWidget):
     def set_center_freq(self, center_freq):
         self.center_freq = center_freq
         self.soapy_hackrf_source_0.set_frequency(0, self.center_freq)
-        self.qtgui_waterfall_sink_x_0.set_frequency_range(0, self.samp_rate)
+        self.qtgui_waterfall_sink_x_0.set_frequency_range(self.center_freq, self.samp_rate)
 
     def get_lna_gain(self):
         return self.lna_gain
@@ -250,14 +250,22 @@ def main(top_block_cls=test1, options=None):
     if options is None:
         parser = ArgumentParser()
         parser.add_argument(
-            "--frequency", type=float, default=100.1,
-            help="Center frequency in MHz (default: 100.1)"
+            "--frequency", type=float, default=100.0,
+            help="Center frequency in MHz (default: 100.0)"
+        )
+        parser.add_argument(
+            "--samp-rate", type=float, default=8.0,
+            choices=[2.0, 4.0, 8.0, 10.0],
+            help="HackRF sample rate in Msps (default: 8.0)"
         )
         options = parser.parse_args()
 
     qapp = Qt.QApplication(sys.argv)
 
-    tb = top_block_cls(center_freq=options.frequency * 1e6)
+    tb = top_block_cls(
+        center_freq=options.frequency * 1e6,
+        samp_rate=options.samp_rate * 1e6,
+    )
 
     tb.start()
     tb.flowgraph_started.set()
