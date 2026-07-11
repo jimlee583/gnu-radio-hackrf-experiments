@@ -14,9 +14,11 @@ from gnuradio import gr
 from gnuradio import analog
 from gnuradio import audio
 from gnuradio import blocks
+from gnuradio import digital
 from gnuradio import filter
 from gnuradio.filter import firdes
 from gnuradio.fft import window
+import rds
 import sys
 import signal
 from PyQt5 import Qt
@@ -191,6 +193,67 @@ class test1(gr.top_block, Qt.QWidget):
         self.audio_gain = blocks.multiply_const_ff(volume)
         self.audio_sink = audio.sink(int(audio_rate), "", True)
 
+        # RDS/RBDS decoder branch. Runs in parallel with wfm_rcv on the same
+        # channel-filtered IQ stream. The composite (MPX) baseband from an
+        # independent quadrature demod is used so the audio path is unchanged.
+        rds_bb_decim = 10
+        rds_bb_rate = int(quad_rate) // rds_bb_decim  # 20 kHz
+        rds_chip_rate = 19000                          # 8 samples/chip * 2375 chips/s
+        rds_symbol_rate = 2375                         # Manchester chip rate
+        rds_sps = 16                                   # samples per RDS bit after Manchester matched filter
+
+        self.rds_quad_demod = analog.quadrature_demod_cf(
+            quad_rate / (2 * math.pi * 75e3)
+        )
+        self.rds_xlate = filter.freq_xlating_fir_filter_fcf(
+            rds_bb_decim,
+            firdes.low_pass(1.0, quad_rate, 7.5e3, 5e3),
+            57e3,
+            quad_rate,
+        )
+        self.rds_resampler = filter.rational_resampler_ccf(
+            interpolation=rds_chip_rate,
+            decimation=rds_bb_rate,
+        )
+        rrc_taps = firdes.root_raised_cosine(
+            1.0, rds_chip_rate, rds_symbol_rate, 1.0, 151
+        )
+        manchester_rrc_taps = [
+            rrc_taps[n] - rrc_taps[n + 8] for n in range(len(rrc_taps) - 8)
+        ]
+        self.rds_matched_filter = filter.fir_filter_ccf(1, manchester_rrc_taps)
+        self.rds_agc = analog.agc_cc(2e-3, 0.585, 53)
+        bpsk_constellation = digital.constellation_bpsk().base()
+        self.rds_symbol_sync = digital.symbol_sync_cc(
+            digital.TED_ZERO_CROSSING,
+            rds_sps,
+            0.01,
+            1.0,
+            1.0,
+            0.1,
+            1,
+            bpsk_constellation,
+            digital.IR_MMSE_8TAP,
+            128,
+            [],
+        )
+        self.rds_constellation_rcv = digital.constellation_receiver_cb(
+            bpsk_constellation, 2 * math.pi / 100, -0.002, 0.002
+        )
+        # constellation_receiver_cb emits diagnostic streams on ports 1..3
+        # (phase err, phase, freq); we only need the sliced symbols on port 0.
+        self.rds_null_err = blocks.null_sink(gr.sizeof_float)
+        self.rds_null_phase = blocks.null_sink(gr.sizeof_float)
+        self.rds_null_freq = blocks.null_sink(gr.sizeof_float)
+        self.rds_diff_decoder = digital.diff_decoder_bb(
+            2, digital.DIFF_DIFFERENTIAL
+        )
+        self.rds_decoder = rds.decoder(False, False)
+        # pty_locale=1 -> North America (RBDS); use 0 for European RDS.
+        self.rds_parser = rds.parser(False, False, 1)
+        self.rds_panel = rds.rdsPanel(center_freq)
+        self.top_layout.addWidget(self.rds_panel)
+
 
         ##################################################
         # Connections
@@ -200,6 +263,21 @@ class test1(gr.top_block, Qt.QWidget):
         self.connect((self.freq_xlating_fir_filter, 0), (self.wfm_rcv, 0))
         self.connect((self.wfm_rcv, 0), (self.audio_gain, 0))
         self.connect((self.audio_gain, 0), (self.audio_sink, 0))
+
+        self.connect((self.freq_xlating_fir_filter, 0), (self.rds_quad_demod, 0))
+        self.connect((self.rds_quad_demod, 0), (self.rds_xlate, 0))
+        self.connect((self.rds_xlate, 0), (self.rds_resampler, 0))
+        self.connect((self.rds_resampler, 0), (self.rds_matched_filter, 0))
+        self.connect((self.rds_matched_filter, 0), (self.rds_agc, 0))
+        self.connect((self.rds_agc, 0), (self.rds_symbol_sync, 0))
+        self.connect((self.rds_symbol_sync, 0), (self.rds_constellation_rcv, 0))
+        self.connect((self.rds_constellation_rcv, 0), (self.rds_diff_decoder, 0))
+        self.connect((self.rds_constellation_rcv, 1), (self.rds_null_err, 0))
+        self.connect((self.rds_constellation_rcv, 2), (self.rds_null_phase, 0))
+        self.connect((self.rds_constellation_rcv, 3), (self.rds_null_freq, 0))
+        self.connect((self.rds_diff_decoder, 0), (self.rds_decoder, 0))
+        self.msg_connect((self.rds_decoder, 'out'), (self.rds_parser, 'in'))
+        self.msg_connect((self.rds_parser, 'out'), (self.rds_panel, 'in'))
 
 
     def closeEvent(self, event):
@@ -226,6 +304,9 @@ class test1(gr.top_block, Qt.QWidget):
         self.center_freq = center_freq
         self.soapy_hackrf_source_0.set_frequency(0, self.center_freq)
         self.qtgui_waterfall_sink_x_0.set_frequency_range(self.center_freq, self.samp_rate)
+        # Update the RDS panel display and reset accumulated station metadata
+        # so stale PS/RT from the previous station is not shown.
+        self.rds_panel.set_frequency(self.center_freq / 1e6)
 
     def get_lna_gain(self):
         return self.lna_gain
