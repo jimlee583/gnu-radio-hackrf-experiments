@@ -5,12 +5,12 @@ A collection of GNU Radio 3.10 + PyQt5 flowgraphs driving a HackRF One:
 - [`hackrf_fm_radio.py`](hackrf_fm_radio.py) — broadcast FM receiver
   (88–108 MHz) with a waterfall, tuning spinbox, LNA/VGA sliders, and
   RDS/RBDS metadata panel.
-- [`hackrf_976_antenna.py`](hackrf_976_antenna.py) — fixed-tune **978 MHz**
-  channelized viewer for antenna evaluation and burst spotting. Tunes the
-  HackRF LO to 979 MHz, then uses a frequency-translating FIR filter to
-  digitally shift, low-pass and decimate the 978 MHz channel down to 2 Msps
-  (FFT + waterfall + channel envelope + averaged channel power, with live
-  gain controls).
+- [`hackrf_976_antenna.py`](hackrf_976_antenna.py) — fixed-tune **1090 MHz**
+  (Mode S / ADS-B) channelized viewer for antenna evaluation and burst
+  spotting. Tunes the HackRF LO to 1091 MHz, then uses a frequency-translating
+  FIR filter to digitally shift, low-pass and decimate the 1090 MHz channel
+  down to 4 Msps (FFT + waterfall + channel envelope + averaged channel
+  power, with live gain controls).
 
 ## Prerequisites
 
@@ -139,35 +139,45 @@ The RBDS locale is used by default (`pty_locale=1` when constructing
 `rds.parser` in `hackrf_fm_radio.py`); change it to `0` if you are outside
 North America and want European PTY category names.
 
-## 978 MHz channelized viewer
+## 1090 MHz ADS-B channelized viewer
 
 `hackrf_976_antenna.py` is a fixed-tune channelized instrument for looking
-at the 978 MHz band (e.g. UAT ADS-B) and judging how well a narrow-band
+at the 1090 MHz band (Mode S / ADS-B) and judging how well a narrow-band
 antenna is picking up signal. The signal chain is:
 
 ```
-HackRF @ 979 MHz LO, 8 Msps
+HackRF @ 1091 MHz LO, 8 Msps
         |
         v
-freq_xlating_fir_filter_ccc: shift -1 MHz -> DC, LPF ~500 kHz, decimate /4
+freq_xlating_fir_filter_ccc: shift -1 MHz -> DC, LPF ~900 kHz, decimate /2
         |
         v
-All four displays run at 2 Msps, centered on 978 MHz
+All four displays run at 4 Msps, centered on 1090 MHz
 ```
 
-Tuning the LO to 979 MHz keeps the 978 MHz target off the HackRF's DC/LO
+Tuning the LO to 1091 MHz keeps the 1090 MHz target off the HackRF's DC/LO
 spur; the frequency-translating FIR filter then digitally shifts the
 channel of interest back to DC while low-pass filtering and decimating in
 one block.
 
+> Note: this tool is for antenna evaluation and activity spotting, not
+> ADS-B decoding. The ~900 kHz channel filter passes the full ADS-B main
+> lobe, but the 16 us envelope smoothing still throws away the sharp 0.5 us
+> pulse structure Mode S decoders need. Use `dump1090` for actual decoding.
+
 The four views (no demodulation, no audio):
 
-- **Spectrum plot** — 2 MHz slice centered on 978 MHz.
+- **Spectrum plot** — 4 MHz slice centered on 1090 MHz.
 - **Waterfall** — spectrum over time, so intermittent bursts remain visible
   after they end.
-- **Channel envelope** — magnitude of the 2 Msps channelized IQ vs time
-  (`complex_to_mag`). Digital traffic such as UAT bursts shows up as short
-  pulses riding above the noise floor.
+- **Channel envelope** — magnitude of the channelized IQ (`complex_to_mag`),
+  smoothed with a 64-sample boxcar and decimated to 125 ksps, displayed
+  over a 50 ms window with an auto rising-edge trigger at level 0.05.
+  ADS-B frames show up as short envelope bumps that latch in the trigger
+  against the ~0.04 noise floor. The plot's control panel lets you drag the
+  trigger level and y-axis live; the underlying constants (`SMOOTH_N`,
+  `SMOOTH_DECIM`, `TIME_WINDOW_S`, `TRIGGER_LEVEL`) are at the top of the
+  script for wider changes.
 - **Averaged channel power (dBFS)** — one number that responds in real time
   as you rotate or reposition the antenna; the fastest way to A/B compare
   orientations or gain settings.
@@ -187,8 +197,8 @@ CLI flags (all optional):
 - `--amp` — enable the HackRF front-end RF amplifier (~+14 dB). Off by
   default; useful for very weak signals but easy to overload with.
 
-The tune frequency (979 MHz LO), channel center (978 MHz) and sample rates
-(8 Msps in, 2 Msps out) are fixed; there is no runtime tuning control.
+The tune frequency (1091 MHz LO), channel center (1090 MHz) and sample rates
+(8 Msps in, 4 Msps out) are fixed; there is no runtime tuning control.
 
 Live controls in the Qt window:
 
@@ -209,13 +219,13 @@ Live controls in the Qt window:
    Watch for flat-topped peaks, new spurs, or a suddenly-jumping noise
    floor, which all indicate the amp is being overdriven.
 4. With gains set sensibly, rotate/reposition the antenna and watch the
-   **Avg Channel Power** number and the height of the 978 MHz peak in the
+   **Avg Channel Power** number and the height of the 1090 MHz peak in the
    FFT — the difference between orientations is your practical measure of
    antenna performance.
 5. Watch the **Channel Envelope** time plot for short amplitude spikes —
-   that is burst activity from digital transmitters on the channel (e.g. UAT
-   ADS-B). A flat trace means no traffic or the signal is too weak; raise
-   gain or confirm aircraft are nearby.
+   that is burst activity from aircraft transponders on the channel (Mode S
+   / ADS-B at 1090 MHz). A flat trace means no traffic or the signal is too
+   weak; raise gain or confirm aircraft are nearby.
 
 This tool only needs the base GNU Radio + Soapy/HackRF stack; it does not
 depend on PortAudio or gr-rds.
