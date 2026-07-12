@@ -162,8 +162,9 @@ one block.
 
 > Note: this tool is for antenna evaluation and activity spotting, not
 > ADS-B decoding. The ~900 kHz channel filter passes the full ADS-B main
-> lobe, but the 16 us envelope smoothing still throws away the sharp 0.5 us
-> pulse structure Mode S decoders need. Use `dump1090` for actual decoding.
+> lobe, and the 2 us envelope smoothing preserves most of the ~1 us pulse
+> structure, but there is still no bit-level Mode S recovery here. Use
+> `dump1090` for actual decoding.
 
 The four views (no demodulation, no audio):
 
@@ -171,8 +172,8 @@ The four views (no demodulation, no audio):
 - **Waterfall** — spectrum over time, so intermittent bursts remain visible
   after they end.
 - **Channel envelope** — magnitude of the channelized IQ (`complex_to_mag`),
-  smoothed with a 64-sample boxcar and decimated to 125 ksps, displayed
-  over a 50 ms window with an auto rising-edge trigger at level 0.05.
+  smoothed with an 8-sample boxcar and decimated to 125 ksps, displayed
+  over a 1 ms window with an auto rising-edge trigger at level 0.05.
   ADS-B frames show up as short envelope bumps that latch in the trigger
   against the ~0.04 noise floor. The plot's control panel lets you drag the
   trigger level and y-axis live; the underlying constants (`SMOOTH_N`,
