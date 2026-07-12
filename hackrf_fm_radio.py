@@ -27,7 +27,7 @@ from gnuradio.eng_arg import eng_float, intx
 from gnuradio import eng_notation
 from gnuradio import soapy
 import math
-import sip
+from PyQt5 import Qt, sip
 import threading
 
 
