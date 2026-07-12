@@ -3,11 +3,11 @@
 #
 # SPDX-License-Identifier: GPL-3.0
 #
-# HackRF One channelized viewer fixed on 978 MHz (e.g. UAT).
+# HackRF One channelized viewer fixed on 1090 MHz (Mode S / ADS-B).
 #
-# Tunes the HackRF LO to 979 MHz to keep the target off the DC/LO spur, then
+# Tunes the HackRF LO to 1091 MHz to keep the target off the DC/LO spur, then
 # uses a frequency-translating FIR filter to shift, low-pass and decimate the
-# 978 MHz channel down to 2 Msps. All four displays (spectrum, waterfall,
+# 1090 MHz channel down to 4 Msps. All four displays (spectrum, waterfall,
 # channel envelope, and averaged channel power) run on that channelized
 # stream so the user can compare antenna orientations / RF gain settings and
 # spot digital burst activity without demodulating.
@@ -23,18 +23,35 @@ from gnuradio.fft import window
 from gnuradio.filter import firdes
 
 
-# Fixed-tune channelized viewer for 978 MHz (e.g. UAT).
+# Fixed-tune channelized viewer for 1090 MHz (Mode S / ADS-B).
 #
-# We tune the HackRF LO to 979 MHz so 978 MHz sits at -1 MHz baseband, well
+# We tune the HackRF LO to 1091 MHz so 1090 MHz sits at -1 MHz baseband, well
 # clear of the HackRF's DC/LO spur, then use a frequency-translating FIR
 # filter to shift the -1 MHz channel back to DC while low-pass filtering and
-# decimating from 8 Msps down to 2 Msps for the displays.
-TUNE_FREQ = 979.0e6
-CHANNEL_CENTER = 978.0e6
+# decimating from 8 Msps down to 4 Msps for the displays.
+TUNE_FREQ = 1091.0e6
+CHANNEL_CENTER = 1090.0e6
 FREQ_SHIFT = CHANNEL_CENTER - TUNE_FREQ  # -1 MHz
 SAMP_RATE = 8.0e6
-CHANNEL_RATE = 2.0e6
-CHANNEL_DECIM = int(SAMP_RATE / CHANNEL_RATE)  # 4
+CHANNEL_RATE = 4.0e6
+CHANNEL_DECIM = int(SAMP_RATE / CHANNEL_RATE)  # 2
+
+# Envelope plot: smooth the |x| stream with a 64-sample moving average and
+# decimate by 32 to a 125 kHz display stream. 64 samples of averaging at
+# 4 Msps corresponds to ~16 us, shorter than an ADS-B extended-squitter
+# frame (~120 us) so bursts are still visible as envelope bumps, but long
+# enough to suppress the sample-by-sample noise on the envelope. (Individual
+# 0.5 us ADS-B pulses are averaged away; this view is for activity, not bit
+# recovery.)
+SMOOTH_N = 64
+SMOOTH_DECIM = 32
+ENV_RATE = CHANNEL_RATE / SMOOTH_DECIM  # 125 kHz
+TIME_WINDOW_S = 0.050  # 50 ms; try 0.020-0.100 to taste
+TIME_SINK_POINTS = int(TIME_WINDOW_S * ENV_RATE)  # 3125 pts
+
+# Envelope trigger. Noise floor sits around 0.04 in the raw magnitude, so
+# 0.05 fires reliably on bursts without free-running on noise.
+TRIGGER_LEVEL = 0.05
 
 
 class antenna_viewer(gr.top_block, Qt.QWidget):
@@ -45,9 +62,9 @@ class antenna_viewer(gr.top_block, Qt.QWidget):
         vga_gain=16,
         amp_enabled=False,
     ):
-        gr.top_block.__init__(self, "HackRF 978 MHz Channel Viewer", catch_exceptions=True)
+        gr.top_block.__init__(self, "HackRF 1090 MHz ADS-B Channel Viewer", catch_exceptions=True)
         Qt.QWidget.__init__(self)
-        self.setWindowTitle("HackRF 978 MHz Channel Viewer")
+        self.setWindowTitle("HackRF 1090 MHz ADS-B Channel Viewer")
         qtgui.util.check_set_qss()
         try:
             self.setWindowIcon(Qt.QIcon.fromTheme("gnuradio-grc"))
@@ -71,14 +88,14 @@ class antenna_viewer(gr.top_block, Qt.QWidget):
         self.vga_gain = vga_gain
         self.amp_enabled = amp_enabled
 
-        # Averaging window for the wideband power number sink. At the 2 Msps
-        # channelized rate a length of 2048 samples is ~1 ms of energy per
+        # Averaging window for the wideband power number sink. At the 4 Msps
+        # channelized rate a length of 4096 samples is ~1 ms of energy per
         # output sample, which gives a stable, non-jittery number without
         # lagging behind antenna movements.
-        self._power_avg_len = 2048
+        self._power_avg_len = 4096
         # Decimate the mag-squared stream before averaging / log so the number
         # sink is not fed millions of updates per second.
-        self._power_decim = 1024
+        self._power_decim = 2048
 
         ##################################################
         # HackRF source
@@ -101,7 +118,7 @@ class antenna_viewer(gr.top_block, Qt.QWidget):
             window.WIN_BLACKMAN_hARRIS,
             CHANNEL_CENTER,
             CHANNEL_RATE,
-            "Spectrum (978 MHz channel)",
+            "Spectrum (1090 MHz channel)",
             1,
             None,
         )
@@ -120,7 +137,7 @@ class antenna_viewer(gr.top_block, Qt.QWidget):
             window.WIN_BLACKMAN_hARRIS,
             CHANNEL_CENTER,
             CHANNEL_RATE,
-            "Waterfall (978 MHz channel)",
+            "Waterfall (1090 MHz channel)",
             1,
             None,
         )
@@ -144,27 +161,41 @@ class antenna_viewer(gr.top_block, Qt.QWidget):
         self.power_sink.enable_autoscale(False)
         self._power_sink_win = sip.wrapinstance(self.power_sink.qwidget(), Qt.QWidget)
 
+        # Wide enough to pass the full ~900 kHz ADS-B main lobe with
+        # comfortable margin: at 4 Msps output the Nyquist is 2 MHz, so the
+        # 900 kHz passband and 1 MHz stopband edge sit well inside the band
+        # with no risk of aliasing.
         chan_taps = firdes.low_pass(
-            1.0, SAMP_RATE, 500e3, 200e3, window.WIN_HAMMING, 6.76
+            1.0, SAMP_RATE, 900e3, 100e3, window.WIN_HAMMING, 6.76
         )
         self.chan_filter = filter.freq_xlating_fir_filter_ccc(
             CHANNEL_DECIM, chan_taps, FREQ_SHIFT, SAMP_RATE
         )
         self.mag = blocks.complex_to_mag(1)
+        self.env_smoother = filter.fir_filter_fff(
+            SMOOTH_DECIM, [1.0 / SMOOTH_N] * SMOOTH_N
+        )
         self.time_sink = qtgui.time_sink_f(
-            2048,
-            CHANNEL_RATE,
-            "978 MHz Channel Envelope",
+            TIME_SINK_POINTS,
+            ENV_RATE,
+            f"1090 MHz Channel Envelope ({int(TIME_WINDOW_S * 1000)} ms, smoothed)",
             1,
             None,
         )
         self.time_sink.set_update_time(0.10)
-        self.time_sink.set_y_axis(-0.1, 1.0)
-        self.time_sink.enable_autoscale(True)
+        self.time_sink.set_y_axis(0.0, 0.5)
+        self.time_sink.enable_autoscale(False)
         self.time_sink.enable_grid(True)
         self.time_sink.enable_axis_labels(True)
-        self.time_sink.enable_control_panel(False)
-        self.time_sink.set_trigger_mode(qtgui.TRIG_MODE_FREE, qtgui.TRIG_SLOPE_POS, 0.0, 0, 0, "")
+        self.time_sink.enable_control_panel(True)
+        self.time_sink.set_trigger_mode(
+            qtgui.TRIG_MODE_AUTO,
+            qtgui.TRIG_SLOPE_POS,
+            TRIGGER_LEVEL,
+            0,
+            0,
+            "",
+        )
         self._time_sink_win = sip.wrapinstance(self.time_sink.qwidget(), Qt.QWidget)
 
         ##################################################
@@ -246,7 +277,8 @@ class antenna_viewer(gr.top_block, Qt.QWidget):
         self.connect((self.chan_filter, 0), (self.freq_sink, 0))
         self.connect((self.chan_filter, 0), (self.waterfall_sink, 0))
         self.connect((self.chan_filter, 0), (self.mag, 0))
-        self.connect((self.mag, 0), (self.time_sink, 0))
+        self.connect((self.mag, 0), (self.env_smoother, 0))
+        self.connect((self.env_smoother, 0), (self.time_sink, 0))
         self.connect((self.chan_filter, 0), (self.mag_squared, 0))
         self.connect((self.mag_squared, 0), (self.decim, 0))
         self.connect((self.decim, 0), (self.moving_avg, 0))
@@ -282,9 +314,9 @@ def main(top_block_cls=antenna_viewer, options=None):
     if options is None:
         parser = ArgumentParser(
             description=(
-                "HackRF One channelized viewer fixed on 978 MHz. Tunes the LO "
-                "to 979 MHz and digitally shifts the 978 MHz channel to DC "
-                "before decimating to 2 Msps."
+                "HackRF One channelized viewer fixed on 1090 MHz (Mode S / "
+                "ADS-B). Tunes the LO to 1091 MHz and digitally shifts the "
+                "1090 MHz channel to DC before decimating to 4 Msps."
             )
         )
         parser.add_argument(
