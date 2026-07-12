@@ -36,18 +36,15 @@ SAMP_RATE = 8.0e6
 CHANNEL_RATE = 4.0e6
 CHANNEL_DECIM = int(SAMP_RATE / CHANNEL_RATE)  # 2
 
-# Envelope plot: smooth the |x| stream with a 64-sample moving average and
-# decimate by 32 to a 125 kHz display stream. 64 samples of averaging at
-# 4 Msps corresponds to ~16 us, shorter than an ADS-B extended-squitter
-# frame (~120 us) so bursts are still visible as envelope bumps, but long
-# enough to suppress the sample-by-sample noise on the envelope. (Individual
-# 0.5 us ADS-B pulses are averaged away; this view is for activity, not bit
-# recovery.)
-SMOOTH_N = 64
-SMOOTH_DECIM = 32
-ENV_RATE = CHANNEL_RATE / SMOOTH_DECIM  # 125 kHz
-TIME_WINDOW_S = 0.050  # 50 ms; try 0.020-0.100 to taste
-TIME_SINK_POINTS = int(TIME_WINDOW_S * ENV_RATE)  # 3125 pts
+# Preserve the 0.5 us ADS-B pulse structure in the envelope display. A
+# two-sample moving average at 4 Msps smooths noise over 0.5 us without
+# decimating away the 1 Mbps PPM waveform. A 150 us window fits a complete
+# 120 us extended-squitter frame with a little context around it.
+SMOOTH_N = 2
+SMOOTH_DECIM = 1
+ENV_RATE = CHANNEL_RATE
+TIME_WINDOW_S = 0.00015
+TIME_SINK_POINTS = int(TIME_WINDOW_S * ENV_RATE)  # 600 pts
 
 # Envelope trigger. Noise floor sits around 0.04 in the raw magnitude, so
 # 0.05 fires reliably on bursts without free-running on noise.
@@ -58,8 +55,8 @@ class antenna_viewer(gr.top_block, Qt.QWidget):
 
     def __init__(
         self,
-        lna_gain=16,
-        vga_gain=16,
+        lna_gain=32,
+        vga_gain=24,
         amp_enabled=False,
     ):
         gr.top_block.__init__(self, "HackRF 1090 MHz ADS-B Channel Viewer", catch_exceptions=True)
@@ -88,13 +85,11 @@ class antenna_viewer(gr.top_block, Qt.QWidget):
         self.vga_gain = vga_gain
         self.amp_enabled = amp_enabled
 
-        # Averaging window for the wideband power number sink. At the 4 Msps
-        # channelized rate a length of 4096 samples is ~1 ms of energy per
-        # output sample, which gives a stable, non-jittery number without
-        # lagging behind antenna movements.
-        self._power_avg_len = 4096
-        # Decimate the mag-squared stream before averaging / log so the number
-        # sink is not fed millions of updates per second.
+        # Average about 128 us of contiguous channel power, approximately one
+        # long ADS-B frame. Decimation is applied after this average so short
+        # bursts are not spread across seconds of sparse input samples.
+        self._power_avg_len = 512
+        # Reduce the already-averaged stream before feeding the number sink.
         self._power_decim = 2048
 
         ##################################################
@@ -127,7 +122,7 @@ class antenna_viewer(gr.top_block, Qt.QWidget):
         self.freq_sink.set_y_label("Relative Gain", "dB")
         self.freq_sink.enable_autoscale(False)
         self.freq_sink.enable_grid(True)
-        self.freq_sink.set_fft_average(0.2)
+        self.freq_sink.set_fft_average(0.05)
         self.freq_sink.enable_axis_labels(True)
         self.freq_sink.enable_control_panel(False)
         self._freq_sink_win = sip.wrapinstance(self.freq_sink.qwidget(), Qt.QWidget)
@@ -189,7 +184,7 @@ class antenna_viewer(gr.top_block, Qt.QWidget):
         self.time_sink.enable_axis_labels(True)
         self.time_sink.enable_control_panel(True)
         self.time_sink.set_trigger_mode(
-            qtgui.TRIG_MODE_AUTO,
+            qtgui.TRIG_MODE_NORM,
             qtgui.TRIG_SLOPE_POS,
             TRIGGER_LEVEL,
             0,
@@ -280,9 +275,9 @@ class antenna_viewer(gr.top_block, Qt.QWidget):
         self.connect((self.mag, 0), (self.env_smoother, 0))
         self.connect((self.env_smoother, 0), (self.time_sink, 0))
         self.connect((self.chan_filter, 0), (self.mag_squared, 0))
-        self.connect((self.mag_squared, 0), (self.decim, 0))
-        self.connect((self.decim, 0), (self.moving_avg, 0))
-        self.connect((self.moving_avg, 0), (self.nlog, 0))
+        self.connect((self.mag_squared, 0), (self.moving_avg, 0))
+        self.connect((self.moving_avg, 0), (self.decim, 0))
+        self.connect((self.decim, 0), (self.nlog, 0))
         self.connect((self.nlog, 0), (self.power_sink, 0))
 
     ##################################################
@@ -320,12 +315,12 @@ def main(top_block_cls=antenna_viewer, options=None):
             )
         )
         parser.add_argument(
-            "--lna", type=int, default=16,
-            help="Initial LNA (IF) gain in dB, 0-40 step 8 (default: 16)",
+            "--lna", type=int, default=32,
+            help="Initial LNA (IF) gain in dB, 0-40 step 8 (default: 32)",
         )
         parser.add_argument(
-            "--vga", type=int, default=16,
-            help="Initial VGA (baseband) gain in dB, 0-62 step 2 (default: 16)",
+            "--vga", type=int, default=24,
+            help="Initial VGA (baseband) gain in dB, 0-62 step 2 (default: 24)",
         )
         parser.add_argument(
             "--amp", action="store_true",
