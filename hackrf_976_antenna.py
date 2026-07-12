@@ -3,11 +3,14 @@
 #
 # SPDX-License-Identifier: GPL-3.0
 #
-# HackRF One spectrum viewer tuned for 978 MHz antenna evaluation.
+# HackRF One channelized viewer fixed on 978 MHz (e.g. UAT).
 #
-# Shows an FFT plot, a waterfall, a narrowband time-domain envelope, and an
-# averaged wideband power reading so the user can compare antenna orientations
-# / RF gain settings and spot digital burst activity without demodulating.
+# Tunes the HackRF LO to 979 MHz to keep the target off the DC/LO spur, then
+# uses a frequency-translating FIR filter to shift, low-pass and decimate the
+# 978 MHz channel down to 2 Msps. All four displays (spectrum, waterfall,
+# channel envelope, and averaged channel power) run on that channelized
+# stream so the user can compare antenna orientations / RF gain settings and
+# spot digital burst activity without demodulating.
 
 import signal
 import sys
@@ -20,22 +23,31 @@ from gnuradio.fft import window
 from gnuradio.filter import firdes
 
 
-HACKRF_SAMP_RATES_MSPS = (2.0, 4.0, 8.0, 10.0, 12.5, 16.0, 20.0)
+# Fixed-tune channelized viewer for 978 MHz (e.g. UAT).
+#
+# We tune the HackRF LO to 979 MHz so 978 MHz sits at -1 MHz baseband, well
+# clear of the HackRF's DC/LO spur, then use a frequency-translating FIR
+# filter to shift the -1 MHz channel back to DC while low-pass filtering and
+# decimating from 8 Msps down to 2 Msps for the displays.
+TUNE_FREQ = 979.0e6
+CHANNEL_CENTER = 978.0e6
+FREQ_SHIFT = CHANNEL_CENTER - TUNE_FREQ  # -1 MHz
+SAMP_RATE = 8.0e6
+CHANNEL_RATE = 2.0e6
+CHANNEL_DECIM = int(SAMP_RATE / CHANNEL_RATE)  # 4
 
 
 class antenna_viewer(gr.top_block, Qt.QWidget):
 
     def __init__(
         self,
-        center_freq=978.0e6,
-        samp_rate=8.0e6,
         lna_gain=16,
         vga_gain=16,
         amp_enabled=False,
     ):
-        gr.top_block.__init__(self, "HackRF 978 MHz Antenna Viewer", catch_exceptions=True)
+        gr.top_block.__init__(self, "HackRF 978 MHz Channel Viewer", catch_exceptions=True)
         Qt.QWidget.__init__(self)
-        self.setWindowTitle("HackRF 978 MHz Antenna Viewer")
+        self.setWindowTitle("HackRF 978 MHz Channel Viewer")
         qtgui.util.check_set_qss()
         try:
             self.setWindowIcon(Qt.QIcon.fromTheme("gnuradio-grc"))
@@ -55,24 +67,18 @@ class antenna_viewer(gr.top_block, Qt.QWidget):
         ##################################################
         # Variables
         ##################################################
-        self.samp_rate = samp_rate
-        self.center_freq = center_freq
         self.lna_gain = lna_gain
         self.vga_gain = vga_gain
         self.amp_enabled = amp_enabled
 
-        # Averaging window for the wideband power number sink. At 8 Msps a
-        # length of 8192 samples is ~1 ms of energy per output sample, which
-        # gives a stable, non-jittery number without lagging behind antenna
-        # movements.
-        self._power_avg_len = 8192
+        # Averaging window for the wideband power number sink. At the 2 Msps
+        # channelized rate a length of 2048 samples is ~1 ms of energy per
+        # output sample, which gives a stable, non-jittery number without
+        # lagging behind antenna movements.
+        self._power_avg_len = 2048
         # Decimate the mag-squared stream before averaging / log so the number
         # sink is not fed millions of updates per second.
-        self._power_decim = 4096
-        # Narrowband branch for the time plot: ~1 MHz channel at ~1 Msps so
-        # digital bursts (e.g. UAT at 978 MHz) are visible in the envelope.
-        self._chan_decim = max(1, int(samp_rate // 1e6))
-        self._chan_rate = samp_rate / self._chan_decim
+        self._power_decim = 1024
 
         ##################################################
         # HackRF source
@@ -80,9 +86,9 @@ class antenna_viewer(gr.top_block, Qt.QWidget):
         self.hackrf_source = soapy.source(
             "driver=hackrf", "fc32", 1, "", "", [""], [""]
         )
-        self.hackrf_source.set_sample_rate(0, samp_rate)
-        self.hackrf_source.set_bandwidth(0, samp_rate)
-        self.hackrf_source.set_frequency(0, center_freq)
+        self.hackrf_source.set_sample_rate(0, SAMP_RATE)
+        self.hackrf_source.set_bandwidth(0, SAMP_RATE)
+        self.hackrf_source.set_frequency(0, TUNE_FREQ)
         self.hackrf_source.set_gain(0, "AMP", bool(amp_enabled))
         self.hackrf_source.set_gain(0, "LNA", min(max(float(lna_gain), 0.0), 40.0))
         self.hackrf_source.set_gain(0, "VGA", min(max(float(vga_gain), 0.0), 62.0))
@@ -93,9 +99,9 @@ class antenna_viewer(gr.top_block, Qt.QWidget):
         self.freq_sink = qtgui.freq_sink_c(
             2048,
             window.WIN_BLACKMAN_hARRIS,
-            center_freq,
-            samp_rate,
-            "Spectrum",
+            CHANNEL_CENTER,
+            CHANNEL_RATE,
+            "Spectrum (978 MHz channel)",
             1,
             None,
         )
@@ -112,9 +118,9 @@ class antenna_viewer(gr.top_block, Qt.QWidget):
         self.waterfall_sink = qtgui.waterfall_sink_c(
             1024,
             window.WIN_BLACKMAN_hARRIS,
-            center_freq,
-            samp_rate,
-            "Waterfall",
+            CHANNEL_CENTER,
+            CHANNEL_RATE,
+            "Waterfall (978 MHz channel)",
             1,
             None,
         )
@@ -139,14 +145,16 @@ class antenna_viewer(gr.top_block, Qt.QWidget):
         self._power_sink_win = sip.wrapinstance(self.power_sink.qwidget(), Qt.QWidget)
 
         chan_taps = firdes.low_pass(
-            1.0, samp_rate, 500e3, 200e3, window.WIN_HAMMING, 6.76
+            1.0, SAMP_RATE, 500e3, 200e3, window.WIN_HAMMING, 6.76
         )
-        self.chan_filter = filter.fir_filter_ccf(self._chan_decim, chan_taps)
+        self.chan_filter = filter.freq_xlating_fir_filter_ccc(
+            CHANNEL_DECIM, chan_taps, FREQ_SHIFT, SAMP_RATE
+        )
         self.mag = blocks.complex_to_mag(1)
         self.time_sink = qtgui.time_sink_f(
             2048,
-            self._chan_rate,
-            "Channel Envelope (~1 MHz)",
+            CHANNEL_RATE,
+            "978 MHz Channel Envelope",
             1,
             None,
         )
@@ -177,29 +185,13 @@ class antenna_viewer(gr.top_block, Qt.QWidget):
         controls = Qt.QGridLayout()
         row = 0
 
-        controls.addWidget(Qt.QLabel("Frequency:"), row, 0)
-        self._freq_spinbox = Qt.QDoubleSpinBox()
-        self._freq_spinbox.setDecimals(3)
-        self._freq_spinbox.setSingleStep(0.1)
-        self._freq_spinbox.setRange(1.0, 6000.0)
-        self._freq_spinbox.setSuffix(" MHz")
-        self._freq_spinbox.setValue(center_freq / 1e6)
-        self._freq_spinbox.valueChanged.connect(lambda mhz: self.set_center_freq(mhz * 1e6))
-        controls.addWidget(self._freq_spinbox, row, 1)
-
-        controls.addWidget(Qt.QLabel("Sample rate:"), row, 2)
-        self._samp_rate_combo = Qt.QComboBox()
-        for msps in HACKRF_SAMP_RATES_MSPS:
-            self._samp_rate_combo.addItem(f"{msps:g} Msps", msps * 1e6)
-        idx = self._samp_rate_combo.findData(samp_rate)
-        if idx < 0:
-            self._samp_rate_combo.addItem(f"{samp_rate / 1e6:g} Msps", samp_rate)
-            idx = self._samp_rate_combo.count() - 1
-        self._samp_rate_combo.setCurrentIndex(idx)
-        self._samp_rate_combo.currentIndexChanged.connect(
-            lambda i: self.set_samp_rate(self._samp_rate_combo.itemData(i))
+        controls.addWidget(
+            Qt.QLabel(
+                f"Tuned: {TUNE_FREQ / 1e6:g} MHz LO -> {CHANNEL_CENTER / 1e6:g} MHz "
+                f"channel @ {CHANNEL_RATE / 1e6:g} Msps"
+            ),
+            row, 0, 1, 4,
         )
-        controls.addWidget(self._samp_rate_combo, row, 3)
 
         self._amp_checkbox = Qt.QCheckBox("RF AMP (+14 dB)")
         self._amp_checkbox.setChecked(bool(amp_enabled))
@@ -250,12 +242,12 @@ class antenna_viewer(gr.top_block, Qt.QWidget):
         ##################################################
         # Connections
         ##################################################
-        self.connect((self.hackrf_source, 0), (self.freq_sink, 0))
-        self.connect((self.hackrf_source, 0), (self.waterfall_sink, 0))
         self.connect((self.hackrf_source, 0), (self.chan_filter, 0))
+        self.connect((self.chan_filter, 0), (self.freq_sink, 0))
+        self.connect((self.chan_filter, 0), (self.waterfall_sink, 0))
         self.connect((self.chan_filter, 0), (self.mag, 0))
         self.connect((self.mag, 0), (self.time_sink, 0))
-        self.connect((self.hackrf_source, 0), (self.mag_squared, 0))
+        self.connect((self.chan_filter, 0), (self.mag_squared, 0))
         self.connect((self.mag_squared, 0), (self.decim, 0))
         self.connect((self.decim, 0), (self.moving_avg, 0))
         self.connect((self.moving_avg, 0), (self.nlog, 0))
@@ -270,20 +262,6 @@ class antenna_viewer(gr.top_block, Qt.QWidget):
         self.stop()
         self.wait()
         event.accept()
-
-    def set_center_freq(self, center_freq):
-        self.center_freq = float(center_freq)
-        self.hackrf_source.set_frequency(0, self.center_freq)
-        self.freq_sink.set_frequency_range(self.center_freq, self.samp_rate)
-        self.waterfall_sink.set_frequency_range(self.center_freq, self.samp_rate)
-
-    def set_samp_rate(self, samp_rate):
-        self.samp_rate = float(samp_rate)
-        self.hackrf_source.set_sample_rate(0, self.samp_rate)
-        self.hackrf_source.set_bandwidth(0, self.samp_rate)
-        self.freq_sink.set_frequency_range(self.center_freq, self.samp_rate)
-        self.waterfall_sink.set_frequency_range(self.center_freq, self.samp_rate)
-        self.time_sink.set_samp_rate(self.samp_rate / self._chan_decim)
 
     def set_lna_gain(self, lna_gain):
         self.lna_gain = int(lna_gain)
@@ -303,16 +281,11 @@ class antenna_viewer(gr.top_block, Qt.QWidget):
 def main(top_block_cls=antenna_viewer, options=None):
     if options is None:
         parser = ArgumentParser(
-            description="HackRF One spectrum viewer for antenna evaluation."
-        )
-        parser.add_argument(
-            "--frequency", type=float, default=978.0,
-            help="Center frequency in MHz (default: 978.0)",
-        )
-        parser.add_argument(
-            "--samp-rate", type=float, default=8.0,
-            choices=list(HACKRF_SAMP_RATES_MSPS),
-            help="HackRF sample rate in Msps (default: 8.0)",
+            description=(
+                "HackRF One channelized viewer fixed on 978 MHz. Tunes the LO "
+                "to 979 MHz and digitally shifts the 978 MHz channel to DC "
+                "before decimating to 2 Msps."
+            )
         )
         parser.add_argument(
             "--lna", type=int, default=16,
@@ -331,8 +304,6 @@ def main(top_block_cls=antenna_viewer, options=None):
     qapp = Qt.QApplication(sys.argv)
 
     tb = top_block_cls(
-        center_freq=options.frequency * 1e6,
-        samp_rate=options.samp_rate * 1e6,
         lna_gain=options.lna,
         vga_gain=options.vga,
         amp_enabled=options.amp,

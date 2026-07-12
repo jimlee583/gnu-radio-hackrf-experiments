@@ -5,10 +5,12 @@ A collection of GNU Radio 3.10 + PyQt5 flowgraphs driving a HackRF One:
 - [`hackrf_fm_radio.py`](hackrf_fm_radio.py) — broadcast FM receiver
   (88–108 MHz) with a waterfall, tuning spinbox, LNA/VGA sliders, and
   RDS/RBDS metadata panel.
-- [`hackrf_976_antenna.py`](hackrf_976_antenna.py) — spectrum-only viewer
-  defaulted to **978 MHz** for evaluating a NooElectric narrow-band antenna
-  (FFT + waterfall + narrowband time envelope + averaged wideband power, with
-  live gain controls).
+- [`hackrf_976_antenna.py`](hackrf_976_antenna.py) — fixed-tune **978 MHz**
+  channelized viewer for antenna evaluation and burst spotting. Tunes the
+  HackRF LO to 979 MHz, then uses a frequency-translating FIR filter to
+  digitally shift, low-pass and decimate the 978 MHz channel down to 2 Msps
+  (FFT + waterfall + channel envelope + averaged channel power, with live
+  gain controls).
 
 ## Prerequisites
 
@@ -137,50 +139,61 @@ The RBDS locale is used by default (`pty_locale=1` when constructing
 `rds.parser` in `hackrf_fm_radio.py`); change it to `0` if you are outside
 North America and want European PTY category names.
 
-## 978 MHz antenna viewer
+## 978 MHz channelized viewer
 
-`hackrf_976_antenna.py` is a lightweight spectrum instrument for judging how
-well a narrow-band antenna (e.g. NooElectric's 978 MHz whip) is picking up
-signal. No demodulation, no audio — four complementary views of the raw IQ
-from the HackRF:
+`hackrf_976_antenna.py` is a fixed-tune channelized instrument for looking
+at the 978 MHz band (e.g. UAT ADS-B) and judging how well a narrow-band
+antenna is picking up signal. The signal chain is:
 
-- **FFT / spectrum plot** — instantaneous power vs frequency, useful for
-  spotting the peak of interest and any nearby interferers.
-- **Waterfall** — spectrum over time, so intermittent bursts are still
-  visible after they end.
-- **Channel envelope (time plot)** — narrowband (~1 MHz) amplitude vs time
-  after decimating to ~1 Msps. Digital traffic such as UAT bursts at 978 MHz
-  show up as short pulses riding above the noise floor.
-- **Averaged wideband power (dBFS)** — one number that responds in real
-  time as you rotate or reposition the antenna; the fastest way to A/B
-  compare orientations or gain settings.
+```
+HackRF @ 979 MHz LO, 8 Msps
+        |
+        v
+freq_xlating_fir_filter_ccc: shift -1 MHz -> DC, LPF ~500 kHz, decimate /4
+        |
+        v
+All four displays run at 2 Msps, centered on 978 MHz
+```
+
+Tuning the LO to 979 MHz keeps the 978 MHz target off the HackRF's DC/LO
+spur; the frequency-translating FIR filter then digitally shifts the
+channel of interest back to DC while low-pass filtering and decimating in
+one block.
+
+The four views (no demodulation, no audio):
+
+- **Spectrum plot** — 2 MHz slice centered on 978 MHz.
+- **Waterfall** — spectrum over time, so intermittent bursts remain visible
+  after they end.
+- **Channel envelope** — magnitude of the 2 Msps channelized IQ vs time
+  (`complex_to_mag`). Digital traffic such as UAT bursts shows up as short
+  pulses riding above the noise floor.
+- **Averaged channel power (dBFS)** — one number that responds in real time
+  as you rotate or reposition the antenna; the fastest way to A/B compare
+  orientations or gain settings.
 
 Run it:
 
 ```bash
 $GR_PYTHON hackrf_976_antenna.py
-# or override defaults:
-$GR_PYTHON hackrf_976_antenna.py --frequency 978.0 --samp-rate 8.0 --lna 24 --vga 20 --amp
+# or trim gains from the CLI:
+$GR_PYTHON hackrf_976_antenna.py --lna 24 --vga 20 --amp
 ```
 
 CLI flags (all optional):
 
-- `--frequency` — center frequency in MHz. Default: `978.0`. HackRF supports
-  roughly 1–6000 MHz.
-- `--samp-rate` — sample rate in Msps. One of `2, 4, 8, 10, 12.5, 16, 20`.
-  Default: `8.0` (~8 MHz of visible spectrum).
 - `--lna` — initial IF LNA gain in dB, 0–40 in 8 dB steps. Default: `16`.
 - `--vga` — initial baseband VGA gain in dB, 0–62 in 2 dB steps. Default: `16`.
 - `--amp` — enable the HackRF front-end RF amplifier (~+14 dB). Off by
   default; useful for very weak signals but easy to overload with.
 
-Live controls in the Qt window mirror the CLI flags and let you change
-everything without restarting the flowgraph:
+The tune frequency (979 MHz LO), channel center (978 MHz) and sample rates
+(8 Msps in, 2 Msps out) are fixed; there is no runtime tuning control.
+
+Live controls in the Qt window:
 
 | Control | HackRF knob | Notes |
 |---|---|---|
-| Frequency spinbox (MHz) | tuner | Full 1–6000 MHz range so you can also sweep nearby bands. |
-| Sample rate combo | ADC rate + baseband filter | Wider rate shows more spectrum at coarser resolution. |
 | **RF AMP** checkbox | Front-end amplifier (`AMP`) | ~+14 dB before the mixer. Boosts weak signals *and* the noise floor. |
 | **LNA** slider (0–40 dB) | IF LNA (`LNA`) | Primary gain knob; adjust first. |
 | **VGA** slider (0–62 dB) | Baseband VGA (`VGA`) | Fine trim after the LNA. |
@@ -195,10 +208,10 @@ everything without restarting the flowgraph:
 3. Only enable **AMP** if the target signal is still buried in noise.
    Watch for flat-topped peaks, new spurs, or a suddenly-jumping noise
    floor, which all indicate the amp is being overdriven.
-4. With gains set sensibly, rotate/reposition the NooElectric antenna and
-   watch the **Avg Wideband Power** number and the height of the 978 MHz
-   peak in the FFT — the difference between orientations is your practical
-   measure of antenna performance.
+4. With gains set sensibly, rotate/reposition the antenna and watch the
+   **Avg Channel Power** number and the height of the 978 MHz peak in the
+   FFT — the difference between orientations is your practical measure of
+   antenna performance.
 5. Watch the **Channel Envelope** time plot for short amplitude spikes —
    that is burst activity from digital transmitters on the channel (e.g. UAT
    ADS-B). A flat trace means no traffic or the signal is too weak; raise
