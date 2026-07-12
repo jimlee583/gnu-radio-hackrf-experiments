@@ -68,7 +68,17 @@ class antenna_viewer(gr.top_block, Qt.QWidget):
         except BaseException as exc:
             print(f"Qt GUI: Could not set Icon: {str(exc)}", file=sys.stderr)
 
-        self.top_layout = Qt.QVBoxLayout(self)
+        # The combined GNU Radio displays can be taller than a laptop screen.
+        # Keep the full widgets (including the time sink's bottom X axis)
+        # reachable instead of allowing the window manager to clip them.
+        self.top_scroll_layout = Qt.QVBoxLayout(self)
+        self.top_scroll = Qt.QScrollArea()
+        self.top_scroll.setFrameStyle(Qt.QFrame.NoFrame)
+        self.top_scroll.setWidgetResizable(True)
+        self.top_scroll_layout.addWidget(self.top_scroll)
+        self.top_widget = Qt.QWidget()
+        self.top_scroll.setWidget(self.top_widget)
+        self.top_layout = Qt.QVBoxLayout(self.top_widget)
 
         self.settings = Qt.QSettings("gnuradio/flowgraphs", "hackrf_976_antenna")
         try:
@@ -84,6 +94,7 @@ class antenna_viewer(gr.top_block, Qt.QWidget):
         self.lna_gain = lna_gain
         self.vga_gain = vga_gain
         self.amp_enabled = amp_enabled
+        self.trigger_level = TRIGGER_LEVEL
 
         # Average about 128 us of contiguous channel power, approximately one
         # long ADS-B frame. Decimation is applied after this average so short
@@ -173,7 +184,7 @@ class antenna_viewer(gr.top_block, Qt.QWidget):
         self.time_sink = qtgui.time_sink_f(
             TIME_SINK_POINTS,
             ENV_RATE,
-            f"1090 MHz Channel Envelope ({int(TIME_WINDOW_S * 1000)} ms, smoothed)",
+            f"1090 MHz Channel Envelope ({TIME_WINDOW_S * 1e6:g} us, smoothed)",
             1,
             None,
         )
@@ -186,7 +197,7 @@ class antenna_viewer(gr.top_block, Qt.QWidget):
         self.time_sink.set_trigger_mode(
             qtgui.TRIG_MODE_NORM,
             qtgui.TRIG_SLOPE_POS,
-            TRIGGER_LEVEL,
+            self.trigger_level,
             0,
             0,
             "",
@@ -256,6 +267,18 @@ class antenna_viewer(gr.top_block, Qt.QWidget):
         controls.addWidget(self._vga_slider, row, 1, 1, 3)
         controls.addWidget(self._vga_value_label, row, 4)
 
+        row += 1
+
+        controls.addWidget(Qt.QLabel("Trigger level:"), row, 0)
+        self._trigger_level_input = Qt.QDoubleSpinBox()
+        self._trigger_level_input.setDecimals(4)
+        self._trigger_level_input.setRange(0.0, 1.0)
+        self._trigger_level_input.setSingleStep(0.005)
+        self._trigger_level_input.setKeyboardTracking(False)
+        self._trigger_level_input.setValue(self.trigger_level)
+        self._trigger_level_input.valueChanged.connect(self.set_trigger_level)
+        controls.addWidget(self._trigger_level_input, row, 1)
+
         self.top_layout.addLayout(controls)
 
         display_row = Qt.QHBoxLayout()
@@ -303,6 +326,17 @@ class antenna_viewer(gr.top_block, Qt.QWidget):
     def set_amp(self, enabled):
         self.amp_enabled = bool(enabled)
         self.hackrf_source.set_gain(0, "AMP", self.amp_enabled)
+
+    def set_trigger_level(self, trigger_level):
+        self.trigger_level = float(trigger_level)
+        self.time_sink.set_trigger_mode(
+            qtgui.TRIG_MODE_NORM,
+            qtgui.TRIG_SLOPE_POS,
+            self.trigger_level,
+            0,
+            0,
+            "",
+        )
 
 
 def main(top_block_cls=antenna_viewer, options=None):
