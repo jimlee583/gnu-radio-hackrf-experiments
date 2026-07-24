@@ -1,6 +1,7 @@
 # Requirements for the offline ADS-B decoder tool (decode_adsb_capture.py).
-# The GNU Radio flowgraphs already bring NumPy and PyQt5; only pyModeS is
-# additional. Install into the same interpreter that runs the flowgraphs so
-# generated NPZ captures are readable by the decoder.
+# The GNU Radio flowgraphs already bring NumPy and PyQt5; only pyModeS and
+# matplotlib are additional. Install into the same interpreter that runs the
+# flowgraphs so generated NPZ captures are readable by the decoder.
 numpy>=1.24
 pyModeS>=3.6
+matplotlib>=3.7

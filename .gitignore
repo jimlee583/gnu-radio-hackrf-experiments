@@ -12,3 +12,4 @@ venv/
 adsb_diagnostics_*.npz
 adsb_diagnostics_*.json
 adsb_diagnostics_*.decoded.json
+adsb_diagnostics_*_magnitude.png

@@ -281,7 +281,8 @@ decode:
 $GR_PYTHON -m pip install -r decoder_requirements.txt
 ```
 
-Only NumPy (already required by GNU Radio) and pyModeS >= 3.6 are needed.
+Only NumPy (already required by GNU Radio), pyModeS >= 3.6, and matplotlib
+>= 3.7 (for `--plot`) are needed.
 
 ### Running the decoder
 
@@ -318,6 +319,27 @@ Flags:
 - `--min-preamble-ratio` / `--min-preamble-pulse-ratio` /
   `--min-bit-confidence` — thresholds used to decide whether a trigger clip
   contains a Mode-S preamble worth reporting.
+- `--plot` — open a magnitude plot of every stored trigger IQ clip. The
+  figure has a heatmap (clip index × time within clip) and a concatenated
+  line of `|IQ|` across all clips. Requires matplotlib.
+- `--plot-output PATH` — save that plot to a file (PNG/PDF/…). Implies
+  `--plot`.
+- `--plot-no-show` — skip the interactive window (useful with
+  `--plot-output` in headless runs). When `--plot` is used with
+  `--plot-no-show` and no `--plot-output`, the file defaults to
+  `<capture>_magnitude.png`.
+- `--plot-baseline` — also include baseline IQ clips in a third panel.
+
+Example:
+
+```bash
+$GR_PYTHON decode_adsb_capture.py adsb_diagnostics_20260715_204127.npz --plot
+$GR_PYTHON decode_adsb_capture.py --plot --plot-no-show --plot-output mag.png
+```
+
+Note: the diagnostic NPZ does not store the full continuous IQ stream —
+only the triggered 150 µs clips (plus optional baseline clips). `--plot`
+shows `|IQ|` for those stored complex samples.
 
 ### Interpreting the output
 

@@ -21,6 +21,7 @@
 #      verified frames in the same capture. Matching frames are promoted
 #      to "icao_matched" so the summary distinguishes reply traffic from a
 #      known aircraft versus reply traffic whose ICAO is unverifiable.
+#   7. Optionally plots |IQ| for every stored trigger clip (--plot).
 
 from __future__ import annotations
 
@@ -766,6 +767,157 @@ def default_output_path(input_path: Path) -> Path:
     return input_path.with_suffix(".decoded.json")
 
 
+def default_plot_path(input_path: Path) -> Path:
+    return input_path.with_name(f"{input_path.stem}_magnitude.png")
+
+
+def _matplotlib_or_raise():
+    """Import matplotlib, or raise a helpful error if it is missing."""
+
+    try:
+        import matplotlib
+
+        return matplotlib
+    except ImportError as exc:  # pragma: no cover - dependency guard
+        raise SystemExit(
+            "error: matplotlib is required for --plot. Install it with:\n"
+            "  python3 -m pip install -r decoder_requirements.txt"
+        ) from exc
+
+
+def load_iq_magnitude_arrays(
+    npz_path: Path,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    """Load trigger/baseline IQ magnitudes and capture metadata from an NPZ."""
+
+    with np.load(npz_path, allow_pickle=False) as archive:
+        metadata = json.loads(str(archive["metadata_json"]))
+        trigger_iq = np.asarray(archive["trigger_iq"], dtype=np.complex64)
+        baseline_iq = np.asarray(archive["baseline_iq"], dtype=np.complex64)
+
+    trigger_mag = np.abs(trigger_iq).astype(np.float64)
+    baseline_mag = np.abs(baseline_iq).astype(np.float64)
+    return trigger_mag, baseline_mag, metadata
+
+
+def plot_iq_magnitudes(
+    npz_path: Path,
+    *,
+    output_path: Path | None = None,
+    show: bool = True,
+    include_baseline: bool = False,
+):
+    """Plot |IQ| for every stored complex sample in a diagnostic capture.
+
+    The NPZ does not keep the full continuous IQ stream — only short clips
+    around each trigger (and optional baseline samples). This figure shows:
+
+    - a heatmap of every trigger clip (rows = clip index, columns = sample)
+    - a line plot of those same magnitudes concatenated in clip order
+
+    When ``include_baseline`` is true and baseline clips exist, a second
+    heatmap panel is added for them.
+    """
+
+    matplotlib = _matplotlib_or_raise()
+    if not show:
+        matplotlib.use("Agg")
+    from matplotlib import pyplot as plt
+
+    trigger_mag, baseline_mag, metadata = load_iq_magnitude_arrays(npz_path)
+    if trigger_mag.size == 0:
+        raise ValueError(f"No trigger IQ samples found in {npz_path}")
+
+    sample_rate = float(metadata.get("channel_sample_rate_sps", 4.0e6))
+    clip_samples = int(trigger_mag.shape[1])
+    clip_us = clip_samples / sample_rate * 1e6
+    trigger_level = None
+    settings = metadata.get("final_settings") or {}
+    if isinstance(settings, dict) and "trigger_level" in settings:
+        trigger_level = float(settings["trigger_level"])
+
+    show_baseline = include_baseline and baseline_mag.size > 0
+    nrows = 3 if show_baseline else 2
+    fig, axes = plt.subplots(
+        nrows,
+        1,
+        figsize=(12, 3.2 * nrows),
+        constrained_layout=True,
+        gridspec_kw={"height_ratios": ([1.2, 1.0, 1.2] if show_baseline else [1.4, 1.0])},
+    )
+    if nrows == 2:
+        ax_heat, ax_line = axes
+        ax_base = None
+    else:
+        ax_heat, ax_line, ax_base = axes
+
+    extent = [0.0, clip_us, trigger_mag.shape[0], 0.0]
+    image = ax_heat.imshow(
+        trigger_mag,
+        aspect="auto",
+        interpolation="nearest",
+        cmap="viridis",
+        extent=extent,
+    )
+    fig.colorbar(image, ax=ax_heat, label="|IQ| amplitude")
+    ax_heat.set_title(
+        f"Trigger IQ magnitude — {trigger_mag.shape[0]} clips × "
+        f"{clip_samples} samples ({npz_path.name})"
+    )
+    ax_heat.set_xlabel("Time within clip (µs)")
+    ax_heat.set_ylabel("Trigger clip index")
+
+    flat = trigger_mag.reshape(-1)
+    sample_index = np.arange(flat.size)
+    ax_line.plot(sample_index, flat, color="#1f77b4", linewidth=0.4)
+    if trigger_level is not None:
+        ax_line.axhline(
+            trigger_level,
+            color="#d62728",
+            linestyle="--",
+            linewidth=1.0,
+            label=f"trigger level {trigger_level:g}",
+        )
+        ax_line.legend(loc="upper right")
+    # Light vertical guides at clip boundaries so the concatenated trace
+    # remains readable when zooming.
+    if trigger_mag.shape[0] <= 250:
+        for boundary in range(clip_samples, flat.size, clip_samples):
+            ax_line.axvline(boundary, color="#cccccc", linewidth=0.3, zorder=0)
+    ax_line.set_xlim(0, max(flat.size - 1, 1))
+    ax_line.set_ylim(bottom=0.0)
+    ax_line.set_title("All trigger IQ magnitudes (clips concatenated)")
+    ax_line.set_xlabel("Sample index across all trigger clips")
+    ax_line.set_ylabel("|IQ| amplitude")
+    ax_line.grid(True, alpha=0.25)
+
+    if ax_base is not None:
+        base_extent = [0.0, clip_us, baseline_mag.shape[0], 0.0]
+        base_image = ax_base.imshow(
+            baseline_mag,
+            aspect="auto",
+            interpolation="nearest",
+            cmap="viridis",
+            extent=base_extent,
+        )
+        fig.colorbar(base_image, ax=ax_base, label="|IQ| amplitude")
+        ax_base.set_title(
+            f"Baseline IQ magnitude — {baseline_mag.shape[0]} clips × "
+            f"{baseline_mag.shape[1]} samples"
+        )
+        ax_base.set_xlabel("Time within clip (µs)")
+        ax_base.set_ylabel("Baseline clip index")
+
+    if output_path is not None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, dpi=150)
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+    return fig
+
+
 def main(argv: Iterable[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
@@ -835,6 +987,33 @@ def main(argv: Iterable[str] | None = None) -> int:
         default=DecoderSettings.min_bit_confidence,
         help="Minimum mean per-bit PPM confidence to accept a preamble.",
     )
+    parser.add_argument(
+        "--plot",
+        action="store_true",
+        help=(
+            "Plot |IQ| for every stored trigger clip (heatmap + concatenated "
+            "line). Requires matplotlib."
+        ),
+    )
+    parser.add_argument(
+        "--plot-output",
+        type=Path,
+        help=(
+            "Save the magnitude plot to this path (PNG/PDF/…). Implies "
+            "--plot. Defaults to <capture>_magnitude.png when --plot is set "
+            "without an explicit path and --plot-no-show is used."
+        ),
+    )
+    parser.add_argument(
+        "--plot-no-show",
+        action="store_true",
+        help="Do not open an interactive plot window (useful with --plot-output).",
+    )
+    parser.add_argument(
+        "--plot-baseline",
+        action="store_true",
+        help="Also include baseline IQ clips in the magnitude plot.",
+    )
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     if args.capture is None:
@@ -866,6 +1045,25 @@ def main(argv: Iterable[str] | None = None) -> int:
         output_path.write_text(json.dumps(report, indent=2) + "\n")
         if not args.quiet:
             print(f"\nWrote decoded report to {output_path}")
+
+    want_plot = args.plot or args.plot_output is not None
+    if want_plot:
+        plot_path = args.plot_output
+        show_plot = not args.plot_no_show
+        if plot_path is None and args.plot_no_show:
+            plot_path = default_plot_path(capture_path)
+        try:
+            plot_iq_magnitudes(
+                capture_path,
+                output_path=plot_path,
+                show=show_plot,
+                include_baseline=args.plot_baseline,
+            )
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        if plot_path is not None and not args.quiet:
+            print(f"Wrote magnitude plot to {plot_path}")
 
     return 0
 

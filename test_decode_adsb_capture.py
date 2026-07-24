@@ -494,6 +494,41 @@ class DecodeCaptureTests(unittest.TestCase):
         self.assertEqual(report["counts"]["valid"], 1)
 
 
+class PlotTests(unittest.TestCase):
+    """Magnitude plotting of stored trigger IQ clips."""
+
+    def test_plot_writes_png_for_synthetic_capture(self):
+        try:
+            import matplotlib  # noqa: F401
+        except ImportError:
+            self.skipTest("matplotlib is not installed in this environment")
+
+        bits = _hex_to_bits(_VALID_HEX)
+        clip = _bits_to_iq_clip(bits)
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            path = _write_synthetic_capture(tmp, [clip, clip])
+            out = tmp / "mag.png"
+            fig = dc.plot_iq_magnitudes(
+                path, output_path=out, show=False, include_baseline=False
+            )
+            self.assertTrue(out.exists())
+            self.assertGreater(out.stat().st_size, 0)
+            # Heatmap + line (+ colorbar axis created by fig.colorbar).
+            self.assertGreaterEqual(len(fig.axes), 2)
+
+    def test_load_iq_magnitude_arrays_shape(self):
+        bits = _hex_to_bits(_VALID_HEX)
+        clip = _bits_to_iq_clip(bits)
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            path = _write_synthetic_capture(tmp, [clip])
+            trigger_mag, baseline_mag, metadata = dc.load_iq_magnitude_arrays(path)
+        self.assertEqual(trigger_mag.shape, (1, 600))
+        self.assertEqual(baseline_mag.shape[0], 0)
+        self.assertEqual(metadata["trigger_capture_count"], 1)
+
+
 class RealCaptureTests(unittest.TestCase):
     """Confirm the recorded helicopter capture decodes as expected."""
 
