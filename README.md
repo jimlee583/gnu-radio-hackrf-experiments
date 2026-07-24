@@ -10,7 +10,19 @@ A collection of GNU Radio 3.10 + PyQt5 flowgraphs driving a HackRF One:
   spotting. Tunes the HackRF LO to 1091 MHz, then uses a frequency-translating
   FIR filter to digitally shift, low-pass and decimate the 1090 MHz channel
   down to 4 Msps (FFT + waterfall + channel envelope + averaged channel
-  power, with live gain controls).
+  power, with live gain controls). Also writes an `adsb_diagnostics_*.npz`
+  diagnostic recording with short IQ snapshots around every threshold
+  crossing.
+- [`decode_adsb_capture.py`](decode_adsb_capture.py) — offline decoder that
+  reads those diagnostic NPZ files, re-detects each Mode-S preamble, uses
+  the leading DF field to route each clip as either a 56-bit short reply
+  (DF0/4/5/11) or a 112-bit long extended-squitter frame (DF17/18/20/21…),
+  applies bounded CRC-guided bit correction where the CRC can be
+  independently verified, cross-references address-parity replies against
+  ICAOs of CRC-verified frames in the same capture, and hands every
+  recovered message to [pyModeS](https://github.com/junzis/pyModeS) for
+  full ADS-B / Mode-S field decoding. Emits both a terminal summary and a
+  JSON report next to the capture.
 
 ## Prerequisites
 
@@ -230,3 +242,120 @@ Live controls in the Qt window:
 
 This tool only needs the base GNU Radio + Soapy/HackRF stack; it does not
 depend on PortAudio or gr-rds.
+
+## Offline ADS-B decoder
+
+`decode_adsb_capture.py` turns the `adsb_diagnostics_*.npz` files written by
+`hackrf_976_antenna.py` into decoded ADS-B / Mode-S messages. For every
+triggered 150 us IQ clip it re-detects the four-pulse Mode-S preamble,
+slices the 1 Mbps pulse-position-modulated payload, inspects the leading
+5-bit downlink format (DF) field to pick 56- or 112-bit message length,
+runs a length-appropriate 24-bit CRC (with bounded 0–2 bit syndrome
+correction for DFs whose CRC is not XORed with an aircraft address), and
+passes every recovered hex message through
+[pyModeS](https://github.com/junzis/pyModeS) for full field decoding.
+
+Two downlink-format families are handled separately:
+
+- **Zero-XOR frames** — DF11 (all-call reply, II=0), DF17 (ADS-B extended
+  squitter) and DF18 (TIS-B ES). The CRC remainder equals zero when the
+  bits are correct, so a CRC-clean message is independently verifiable and
+  a 1- or 2-bit syndrome correction is safe to apply.
+- **Address-parity frames** — DF0/4/5 (short surveillance replies), DF16
+  (long ACAS), DF20/21 (Comm-B) and DF24 (Comm-D). The CRC is XORed with
+  the aircraft's 24-bit ICAO address, so pyModeS *derives* the ICAO from
+  the CRC XOR-parity but the bit vector cannot be verified from itself.
+  These messages are labelled `address_parity` in the report and their
+  pyModeS-derived ICAO is cross-referenced against every ICAO recovered
+  from a CRC-verified frame in the same capture — matches are promoted to
+  `icao_matched`, so reply traffic from an aircraft you also received an
+  ADS-B ES from is clearly distinguished from noise-triggered "replies."
+
+### Installing the decoder dependencies
+
+pyModeS is not part of GNU Radio. Install it into the same interpreter you
+use to run the flowgraphs so a single Python environment can capture and
+decode:
+
+```bash
+$GR_PYTHON -m pip install -r decoder_requirements.txt
+```
+
+Only NumPy (already required by GNU Radio) and pyModeS >= 3.6 are needed.
+
+### Running the decoder
+
+With no arguments the tool automatically opens the most recent
+`adsb_diagnostics_*.npz` file in the current directory:
+
+```bash
+$GR_PYTHON decode_adsb_capture.py
+```
+
+Explicit filenames and options are all optional:
+
+```bash
+$GR_PYTHON decode_adsb_capture.py adsb_diagnostics_20260715_204127.npz \
+    --output my_report.json
+```
+
+Flags:
+
+- `capture` — optional path to a specific NPZ file. If omitted, the newest
+  `adsb_diagnostics_*.npz` in `--directory` (current working directory by
+  default) is decoded.
+- `--output`, `-o` — path for the JSON report. Defaults to
+  `<capture>.decoded.json` alongside the input.
+- `--no-json` — skip writing the JSON report; print the summary only.
+- `--quiet` — suppress the human-readable summary; still writes JSON.
+- `--max-correctable-bits {0,1,2}` — cap on bit-flips the CRC syndrome
+  table may apply, for zero-XOR DFs only. Default is `2`. Any correction
+  is additionally rejected unless the recovered message still looks like a
+  zero-XOR frame (DF11 for short messages, DF17 or DF18 for long messages,
+  with a non-zero ICAO), so 2-bit corrections cannot silently invent
+  packets from noise. Address-parity DFs are never syndrome-corrected
+  because their CRC is XORed with the unknown ICAO.
+- `--min-preamble-ratio` / `--min-preamble-pulse-ratio` /
+  `--min-bit-confidence` — thresholds used to decide whether a trigger clip
+  contains a Mode-S preamble worth reporting.
+
+### Interpreting the output
+
+Every strong preamble candidate becomes one row of the table:
+
+| Column | Meaning |
+|---|---|
+| `idx` | Trigger clip index inside the NPZ file. |
+| `time_s` | Capture time, seconds after recording start. |
+| `DF` | Downlink format extracted from the leading 5 bits (0/4/5/11 → short reply, 17/18 → ADS-B ES, 20/21 → Comm-B, …). |
+| `bits` | Message length in bits (56 for short replies, 112 for long frames). |
+| `status` | One of `valid` (CRC = 0), `corrected_1bit`, `corrected_2bit`, `icao_matched` (address-parity DF whose CRC-XOR ICAO matches a CRC-verified aircraft from the same capture), `address_parity` (address-parity DF with no cross-reference match), or `unverified` (no bounded correction produced a plausible zero-XOR message). |
+| `hex` | 14- or 28-character message hex — corrected if a fix was applied, otherwise the raw slicing. |
+| `fields` | Highlights from the pyModeS decode (ICAO, type code, callsign, altitude, CPR position, velocity, flight status…) for every non-`unverified` row. Address-parity rows show the CRC-XOR-derived ICAO explicitly — remember it may be wrong if the payload bits were corrupted. |
+
+The JSON report contains everything above plus the full pyModeS decoded
+dict for each candidate, the set of ICAOs recovered from CRC-verified
+frames, capture metadata, and the decoder settings used, which makes it
+easy to compare captures against each other.
+
+Nothing is fabricated for unverified candidates — they are listed so you
+can see how many Mode-S bursts the recording actually contained even when
+signal quality was too poor to recover the payload. Address-parity rows
+whose ICAO does not match any CRC-verified aircraft are similarly
+suspect: with an all-noise payload the CRC-XOR still produces *some*
+24-bit ICAO, so treat those rows as raw-bits-plus-a-guess rather than
+confirmed aircraft data.
+
+### Running the tests
+
+```bash
+$GR_PYTHON -m unittest -v test_decode_adsb_capture.py
+```
+
+The suite covers CRC arithmetic for both 56- and 112-bit frames, 1- and
+2-bit syndrome correction for each length, DF-based message-length
+routing, preamble detection, PPM slicing (including short-frame clips),
+address-parity classification, ICAO cross-referencing across a capture,
+latest-file selection, JSON serialization, and an end-to-end pyModeS
+decode against a known-good ADS-B position packet.
+
